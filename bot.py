@@ -1,4 +1,3 @@
-
 import os
 import asyncio
 import yt_dlp
@@ -6,10 +5,11 @@ import yt_dlp
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart
 from aiogram.types import FSInputFile
+from aiogram.enums import ParseMode
 
-TOKEN = "8662790197:AAHTyhi1dG_s1M35MMFa2GCSBhKQ9760Znc"
+TOKEN = os.environ.get("TOKEN")
 
-bot = Bot(token=TOKEN)
+bot = Bot(token=TOKEN, parse_mode=ParseMode.HTML)
 dp = Dispatcher()
 
 DOWNLOADS_DIR = "downloads"
@@ -25,46 +25,74 @@ async def start(message: types.Message):
 
 
 @dp.message()
-async def download_video(message: types.Message):
-    url = message.text.strip()
+async def handler(message: types.Message):
+    url = (message.text or "").strip()
 
-    await message.answer("Скачиваю видео...")
+    # 1. защита от мусора
+    if not url.startswith("http"):
+        await message.answer("Нужно отправить ссылку (http/https)")
+        return
+
+    await message.answer("Обрабатываю запрос...")
 
     file_path = None
 
     ydl_opts = {
-        "outtmpl": f"{DOWNLOADS_DIR}/%(title)s.%(ext)s",
+        "outtmpl": f"{DOWNLOADS_DIR}/%(title).50s.%(ext)s",
         "format": "mp4/best",
         "noplaylist": True,
         "quiet": True,
 
-        # ВАЖНЫЕ СТАБИЛИЗАЦИИ
-        "retries": 10,
+        # стабильность
+        "retries": 5,
         "socket_timeout": 30,
         "nocheckcertificate": True,
+        "concurrent_fragment_downloads": 2,
+
+        # помогает YouTube
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android"]
+            }
+        }
     }
 
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            file_path = ydl.prepare_filename(info)
+        loop = asyncio.get_event_loop()
 
-        video_file = FSInputFile(file_path)
+        def download():
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                return ydl.prepare_filename(info)
+
+        file_path = await loop.run_in_executor(None, download)
+
+        if not file_path or not os.path.exists(file_path):
+            await message.answer("Не удалось скачать видео")
+            return
+
+        video = FSInputFile(file_path)
 
         try:
-            await message.answer_video(video_file)
-        except:
-            await message.answer_document(video_file)
+            await message.answer_video(video)
+        except Exception:
+            await message.answer_document(video)
 
     except Exception as e:
-        await message.answer(f"Ошибка:\n{e}")
+        await message.answer(f"Ошибка при обработке:\n{str(e)[:400]}")
 
     finally:
-        if file_path and os.path.exists(file_path):
-            os.remove(file_path)
+        try:
+            if file_path and os.path.exists(file_path):
+                os.remove(file_path)
+        except:
+            pass
 
 
 async def main():
+    if not TOKEN:
+        raise ValueError("TOKEN не задан в переменных среды")
+
     await dp.start_polling(bot)
 
 
